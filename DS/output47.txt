@@ -1,0 +1,4 @@
+Operator kernel (integer):
+[ -0.333,  0.296,-41.   ,  1.   ]
+Operator kernel (normalized):
+[-0.008, 0.007,-1.   , 0.024]
