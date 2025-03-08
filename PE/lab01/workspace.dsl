@@ -8,20 +8,28 @@ workspace {
 
         socialNetwork = softwareSystem "Social network" {
             service = container "Service" {
+
                 description "Handles users, posts, and messages"
                 technology "python"
 
-                component "User component" {
+                // HTTP API
+                apiGateway = component "API Gateway" {
+                description "Handles HTTP requests and routes them to the service"
+                technology "Flask"
+                }
+
+
+                userComponent = component "User component" {
                     description "Handles user registration and retrieval"
                     technology "FastAPI/Flask"
                 }
 
-                component "Post component" {
+                postComponent = component "Post component" {
                     description "Handles post creation and retrieval"
                     technology "FastAPI/Flask"
                 }
 
-                component "Message component" {
+                messageComponent = component "Message component" {
                     description "Handles sending and receiving messages"
                     technology "FastAPI/Flask"
                 }
@@ -48,14 +56,11 @@ workspace {
                 description "Visualizes monitoring data"
                 technology "Grafana"
             }
+            
+            apiGateway -> userComponent
+            apiGateway -> messageComponent
+            apiGateway -> postComponent
 
-            // HTTP API
-            apiGateway = container "API Gateway" {
-                description "Handles HTTP requests and routes them to the service"
-                technology "Flask"
-            }
-
-            apiGateway -> service "Routes HTTP requests"
             service -> database "Reads/Writes data"
             service -> cacheService "Stores/Retrieves cached data"
             service -> metricsCollector "Sends metrics"
@@ -66,6 +71,8 @@ workspace {
             admin -> socialNetwork "Manages system"
         }
     }
+
+    
 
     views {
         systemContext socialNetwork {
@@ -81,6 +88,14 @@ workspace {
         component service {
             include *
             autoLayout lr
+        }
+
+        dynamic socialNetwork "SendMessage" {
+            user -> service "Sends message request"
+            service -> database "Writes message"
+            database -> service "Message saved"
+            service -> user "Message saved"
+            service -> cacheService "Caches recent messages"
         }
     }
 }
