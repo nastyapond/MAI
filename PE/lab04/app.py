@@ -2,15 +2,18 @@ from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from jose import jwt, JWTError
 from datetime import datetime, timedelta, timezone
+import uvicorn
 from typing import List
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy import create_engine
 from passlib.context import CryptContext
-import uvicorn
 import os
 
-from models import User, Message 
+from bson import ObjectId
+from mongodb import messages_collection
+
+from models import User 
 # http://localhost:8080/docs
 
 
@@ -21,10 +24,10 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 def hash_password(password: str) -> str:
     return pwd_context.hash(password)
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+def verify_password(plain_password: str, password: str) -> bool:
+    return pwd_context.verify(plain_password, password)
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@db:5432/social_db")
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql+psycopg2://postgres:postgres@postgres:5432/social_db")
 
 engine = create_engine(DATABASE_URL)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -71,13 +74,12 @@ class MessageCreate(BaseModel):
 
 class MessageCreateResponse(BaseModel):
     message: str
-    message_id: int
 
 class MessageDelete(BaseModel):
     message_id: int
 
 class MessageResponse(BaseModel):
-    id: int
+    id: str
     sender: str
     recipient:str
     text: str
@@ -121,7 +123,7 @@ def get_current_user(token: HTTPAuthorizationCredentials = Depends(auth_scheme),
 @app.post("/login", response_model=TokenResponse)
 def login(form_data: UserCreate, db: Session = Depends(get_db)):
     user = db.query(User).filter_by(username=form_data.username).first()
-    if not user or not verify_password(form_data.password, user.hashed_password):  
+    if not user or not verify_password(form_data.password, user.password):
         raise HTTPException(status_code=400, detail="Invalid credentials")
     
     token = create_token(user.username)
@@ -135,8 +137,8 @@ def create_user(user: UserCreate, db: Session = Depends(get_db)):
     if existing_user:
         raise HTTPException(status_code=400, detail="User already exists")
     
-    hashed_password = hash_password(user.password)
-    db_user = User(username=user.username, hashed_password=hashed_password)
+    password = hash_password(user.password)
+    db_user = User(username=user.username, password=password)
     db.add(db_user)
     db.commit()
     db.refresh(db_user)
@@ -160,7 +162,6 @@ def delete_user(username: str, db: Session = Depends(get_db), current_user: User
     return UserDeleteResponse(message=f"User {username} deleted")
 
 
-
 # Эндпоинт для получения информации о себе (нужен токен)
 @app.get("/users/me", response_model=UserResponse)
 def get_user_info(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -173,55 +174,64 @@ def get_user_info(current_user: User = Depends(get_current_user), db: Session = 
 
 # Эндпоинт для отправки сообщения
 @app.post("/users/{username}/messages/", response_model=MessageCreateResponse)
-def send_message(username: str, msg: MessageCreate, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    sender = db.query(User).filter_by(username=username).first()
-    recipient = db.query(User).filter_by(username=msg.recipient).first()
+async def send_message(
+    username: str,
+    msg: MessageCreate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if username != current_user.username and current_user.username != "admin":
+        raise HTTPException(status_code=403, detail="Access denied")
 
-    if not sender or not recipient:
-        raise HTTPException(status_code=404, detail="Sender or recipient not found")
+    recipient_user = db.query(User).filter_by(username=msg.recipient).first()
+    if not recipient_user:
+        raise HTTPException(status_code=404, detail="Recipient not found")
 
-    new_message = Message(
-        sender=current_user.username,  
-        recipient=msg.recipient,
-        text=msg.text
-    )
+    message = {
+        "sender": current_user.username,
+        "recipient": msg.recipient,
+        "text": msg.text,
+        "timestamp": datetime.utcnow()
+    }
+    result = await messages_collection.insert_one(message)
 
-    db.add(new_message)
-    db.commit()
-    db.refresh(new_message)
-    return MessageCreateResponse(message="Message sent", message_id=new_message.id)
+    return MessageCreateResponse(message="Message sent")
 
 
 # Эндпоинт для получения всех своих сообщений
 @app.get("/users/{username}/messages/", response_model=MessagesResponse)
-def get_messages(username: str, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+async def get_messages(username: str, current_user: User = Depends(get_current_user)):
     if current_user.username != username and current_user.username != "admin":
         raise HTTPException(status_code=403, detail="Access denied")
 
-    messages = db.query(Message).filter_by(recipient=username).all()
+    messages_cursor = messages_collection.find({"recipient": username})
+    messages = await messages_cursor.to_list(length=100)
 
     if not messages:
         raise HTTPException(status_code=404, detail="No messages found")
-    
-    message_list = [MessageResponse(id=msg.id, sender=msg.sender, recipient=msg.recipient, text=msg.text) for msg in messages]
-    
-    return MessagesResponse(messages=message_list)
+
+    return MessagesResponse(messages=[
+        MessageResponse(
+            id = str(msg["_id"]),
+            sender=msg["sender"],
+            recipient=msg["recipient"],
+            text=msg["text"]
+        ) for msg in messages
+    ])
 
 
 # Эндпоинт для удаления сообщения
 @app.delete("/users/{username}/messages/{message_id}", response_model=MessageDeleteResponse)
-def delete_message(username: str, message_id: int, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
-    message = db.query(Message).filter_by(id=message_id).first()
-    
+async def delete_message(username: str, message_id: str, current_user: User = Depends(get_current_user)):
+    message = await messages_collection.find_one({"_id": ObjectId(message_id)})
+
     if not message:
         raise HTTPException(status_code=404, detail="Message not found")
-    
-    if message.sender != current_user.username and current_user.username != "admin":
+
+    if message["sender"] != current_user.username and current_user.username != "admin":
         raise HTTPException(status_code=403, detail="You can only delete your own messages")
 
-    db.delete(message)
-    db.commit()
-    
+    await messages_collection.delete_one({"_id": ObjectId(message_id)})
     return MessageDeleteResponse(message="Message deleted")
 
 
