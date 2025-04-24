@@ -6,6 +6,7 @@ services:
     container_name: postgres
     restart: always
     environment:
+    
       POSTGRES_DB: social_db
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -25,6 +26,14 @@ services:
       - mongo_data:/data/db
       - ./init_messages.js:/docker-entrypoint-initdb.d/init_messages.js
 
+  redis:
+    image: redis:7
+    container_name: redis
+    ports: 
+      - 6379:6379
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
   app:
     build:
       context: .
@@ -34,9 +43,11 @@ services:
     depends_on:
       - db
       - mongo
+      - redis
     volumes:
       - .:/app
 
 volumes:
   postgres_data:
   mongo_data:
+  redis_data:
